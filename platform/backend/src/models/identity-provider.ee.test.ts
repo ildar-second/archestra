@@ -66,6 +66,98 @@ function createParams(
 
 describe("IdentityProviderModel", () => {
   describe("create", () => {
+    test("hydrates OIDC discovery before registering with Better Auth", async ({
+      makeOrganization,
+      makeUser,
+    }) => {
+      const org = await makeOrganization();
+      const user = await makeUser();
+
+      const registerSSOProvider = vi.fn(async ({ body }) => {
+        await db.insert(schema.identityProvidersTable).values({
+          id: crypto.randomUUID(),
+          providerId: body.providerId,
+          issuer: body.issuer,
+          domain: body.domain,
+          organizationId: org.id,
+          userId: user.id,
+          oidcConfig: JSON.stringify(
+            body.oidcConfig,
+          ) as unknown as typeof schema.identityProvidersTable.$inferInsert.oidcConfig,
+        });
+      });
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          issuer: "https://sso.myid.disney.com/oauth2/example",
+          authorization_endpoint:
+            "https://sso.myid.disney.com/oauth2/example/v1/authorize",
+          token_endpoint: "https://sso.myid.disney.com/oauth2/example/v1/token",
+          token_endpoint_auth_methods_supported: [
+            "client_secret_post",
+            "client_secret_basic",
+          ],
+          jwks_uri: "https://sso.myid.disney.com/oauth2/example/v1/keys",
+          userinfo_endpoint:
+            "https://sso.myid.disney.com/oauth2/example/v1/userinfo",
+        }),
+      });
+
+      try {
+        const created = await IdentityProviderModel.create(
+          {
+            providerId: "myid",
+            issuer: "https://sso.myid.disney.com/oauth2/example",
+            domain: "disney.com",
+            userId: user.id,
+            oidcConfig: {
+              issuer: "https://sso.myid.disney.com/oauth2/example",
+              pkce: true,
+              clientId: "load-spark-platform",
+              clientSecret: "secret",
+              discoveryEndpoint:
+                "https://sso.myid.disney.com/oauth2/example/.well-known/openid-configuration",
+              scopes: ["openid", "email", "profile"],
+            },
+          },
+          org.id,
+          new Headers(),
+          {
+            api: {
+              registerSSOProvider,
+            },
+          } as unknown as Parameters<typeof IdentityProviderModel.create>[3],
+        );
+
+        expect(registerSSOProvider).toHaveBeenCalledWith(
+          expect.objectContaining({
+            body: expect.objectContaining({
+              oidcConfig: expect.objectContaining({
+                skipDiscovery: true,
+                authorizationEndpoint:
+                  "https://sso.myid.disney.com/oauth2/example/v1/authorize",
+                tokenEndpoint:
+                  "https://sso.myid.disney.com/oauth2/example/v1/token",
+                jwksEndpoint:
+                  "https://sso.myid.disney.com/oauth2/example/v1/keys",
+                userInfoEndpoint:
+                  "https://sso.myid.disney.com/oauth2/example/v1/userinfo",
+                tokenEndpointAuthentication: "client_secret_basic",
+              }),
+            }),
+          }),
+        );
+        expect(created.oidcConfig?.skipDiscovery).toBe(true);
+        expect(created.oidcConfig?.authorizationEndpoint).toBe(
+          "https://sso.myid.disney.com/oauth2/example/v1/authorize",
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
     test("persists enterprise-managed credentials inside oidcConfig", async ({
       makeOrganization,
       makeUser,
